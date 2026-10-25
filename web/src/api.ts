@@ -1,16 +1,18 @@
-import type { Release } from '../../shared/release';
+import type { Release, ReleasePage } from '../../shared/release';
 
 export const RELEASE_FIELDS = `id name dueAt additionalInfo status steps { id label completed }`;
 
-export async function request<T>(query: string, variables: Record<string, unknown> = {}): Promise<T> {
+export async function request<T>(query: string, variables: Record<string, unknown> = {}, signal?: AbortSignal): Promise<T> {
   let response: Response;
   try {
     response = await fetch('/graphql', {
       method: 'POST',
+      signal: signal ? AbortSignal.any([signal, AbortSignal.timeout(10000)]) : AbortSignal.timeout(10000),
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ query, variables }),
     });
-  } catch {
+  } catch (error) {
+    if (signal?.aborted) throw error;
     throw new Error('Cannot connect to the server. Check your connection and try again.');
   }
   let result: { data?: T; errors?: { message: string; }[]; };
@@ -23,7 +25,10 @@ export async function request<T>(query: string, variables: Record<string, unknow
 }
 
 export const api = {
-  list: () => request<{ releases: Release[]; }>(`query Releases { releases { ${RELEASE_FIELDS} } }`),
+  list: (after: string | null = null, signal?: AbortSignal) => request<{ releases: ReleasePage }>(
+    `query Releases($after: String) { releases(first: 25, after: $after) { nodes { id name dueAt status } endCursor hasNextPage } }`, { after }, signal),
+  detail: (id: string, signal?: AbortSignal) => request<{ release: Release }>(
+    `query Release($id: ID!) { release(id: $id) { ${RELEASE_FIELDS} } }`, { id }, signal),
   create: (input: { name: string; dueAt: string; additionalInfo: string; }) => request<{ createRelease: Release; }>(
     `mutation CreateRelease($input: CreateReleaseInput!) { createRelease(input: $input) { ${RELEASE_FIELDS} } }`, { input }),
   step: (id: string, stepId: string, completed: boolean) => request<{ setReleaseStep: Release; }>(

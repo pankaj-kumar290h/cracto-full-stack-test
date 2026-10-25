@@ -3,6 +3,7 @@ import { buildSchema } from 'graphql';
 import { STEPS, releaseStatus, type Release } from '../shared/release.js';
 import { notFound, validateId, validateName, validateDate, validateInfo, validateStep } from './domain.js';
 import { pool } from './db.js';
+import { pageSize, decodeCursor, encodeCursor } from './pagination.js';
 
 export const schema = buildSchema(`
   enum ReleaseStatus { planned ongoing done }
@@ -16,7 +17,9 @@ export const schema = buildSchema(`
     steps: [Step!]!
   }
   input CreateReleaseInput { name: String!, dueAt: String!, additionalInfo: String }
-  type Query { releases: [Release!]! }
+  type ReleaseSummary { id: ID!, name: String!, dueAt: String!, status: ReleaseStatus! }
+  type ReleasePage { nodes: [ReleaseSummary!]!, endCursor: String, hasNextPage: Boolean! }
+  type Query { releases(first: Int = 25, after: String): ReleasePage!, release(id: ID!): Release! }
   type Mutation {
     createRelease(input: CreateReleaseInput!): Release!
     setReleaseStep(id: ID!, stepId: ID!, completed: Boolean!): Release!
@@ -31,14 +34,19 @@ type ReleaseRow = {
   due_at: Date;
   additional_info: string | null;
   completed_step_ids: string[];
+  cursor_due_at: string;
 };
 
 async function query(sql: string, values: unknown[] = []) {
+  const started = performance.now();
   try {
     return (await pool.query<ReleaseRow>(sql, values)).rows;
   } catch (error) {
     console.error(error);
     throw new Error('Database request failed. Please try again.');
+  } finally {
+    const duration = performance.now() - started;
+    if (process.env.PERF_LOGGING === 'true') console.info(JSON.stringify({ event: 'database', command: sql.trim().split(/\s+/)[0], durationMs: Math.round(duration) }));
   }
 }
 
@@ -55,7 +63,25 @@ function toRelease(row?: ReleaseRow): Release {
 }
 
 export const rootValue = {
-  releases: async () => (await query('SELECT * FROM releases ORDER BY due_at, id')).map(toRelease),
+  releases: async ({ first, after }: { first?: number; after?: string | null }) => {
+    const size = pageSize(first);
+    const cursor = after == null ? null : decodeCursor(after);
+    const columns = 'id, name, due_at, completed_step_ids, due_at::text AS cursor_due_at';
+    const rows = cursor
+      ? await query(`SELECT ${columns} FROM releases WHERE (due_at, id) > ($1::timestamptz, $2::uuid) ORDER BY due_at, id LIMIT $3`, [...cursor, size + 1])
+      : await query(`SELECT ${columns} FROM releases ORDER BY due_at, id LIMIT $1`, [size + 1]);
+    const page = rows.slice(0, size);
+    const last = page.at(-1);
+    return {
+      nodes: page.map(row => ({ id: row.id, name: row.name, dueAt: row.due_at.toISOString(), status: releaseStatus(row.completed_step_ids) })),
+      endCursor: last ? encodeCursor(last.cursor_due_at, last.id) : null,
+      hasNextPage: rows.length > size,
+    };
+  },
+
+  release: async ({ id }: { id: string }) => toRelease((await query(
+    'SELECT id, name, due_at, additional_info, completed_step_ids FROM releases WHERE id = $1', [validateId(id)],
+  ))[0]),
 
   createRelease: async ({ input }: { input: { name: string; dueAt: string; additionalInfo?: string | null } }) => {
     const rows = await query(
@@ -87,7 +113,7 @@ export const rootValue = {
   },
 
   deleteRelease: async ({ id }: { id: string }) => {
-    const rows = await query('DELETE FROM releases WHERE id = $1 RETURNING *', [validateId(id)]);
+    const rows = await query('DELETE FROM releases WHERE id = $1 RETURNING id', [validateId(id)]);
     if (!rows[0]) throw notFound();
     return rows[0].id;
   },

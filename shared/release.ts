@@ -18,6 +18,9 @@ export type Release = {
   steps: { id: string; label: string; completed: boolean }[];
 };
 
+export type ReleaseSummary = Pick<Release, 'id' | 'name' | 'dueAt' | 'status'>;
+export type ReleasePage = { nodes: ReleaseSummary[]; endCursor: string | null; hasNextPage: boolean };
+
 export function releaseStatus(ids: readonly string[]): Release['status'] {
   const count = new Set(ids.filter((id) => STEPS.some((step) => step.id === id))).size;
   return count === 0 ? 'planned' : count === STEPS.length ? 'done' : 'ongoing';
